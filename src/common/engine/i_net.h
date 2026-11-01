@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "tarray.h"
+#include "zstring.h"
 
 inline constexpr size_t MAXPLAYERS = 64u;
 
@@ -74,5 +75,28 @@ void I_NetCmd(ENetCommand cmd);
 void I_NetDone();
 void HandleIncomingConnection();
 void CloseNetwork();
+
+// A lobby found by broadcasting on the local network (I_NetScanLAN).
+struct FLanGame
+{
+	FString Address;	// "ip:port", as -join takes it
+	FString HostName;
+	int Players = 0;
+	int MaxPlayers = 0;
+	bool Password = false;
+	bool Compatible = false;	// same engine version as ours
+};
+
+// Asks the local network (and this machine) for lobbies on `port`, listening for `waitMs` milliseconds.
+void I_NetScanLAN(int port, int waitMs, TArray<FLanGame>& found);
+
+// If the menu asked to host or join a game, starts the program again with the right arguments. Called by main() once
+// everything has been shut down; only returns if there was nothing to do (or it failed).
+void I_RelaunchIfRequested();
+
+// Called as the game ends: if the menu started this network game and it never got going (aborted, or couldn't connect),
+// ask for the game to start again without it, so the player is back at the menu.
+bool I_NetStartInterrupted();
+void I_NetMenuReturnToMenu();
 
 #endif

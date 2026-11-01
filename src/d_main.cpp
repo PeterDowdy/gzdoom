@@ -57,6 +57,7 @@
 #include "d_event.h"
 #include "d_main.h"
 #include "d_net.h"
+#include "i_net.h"
 #include "d_netinf.h"
 #include "decallib.h"
 #include "doomdef.h"
@@ -3980,6 +3981,7 @@ int GameMain()
 	}
 	// Unless something really bad happened, the game should only exit through this single point in the code.
 	// No more 'exit', please.
+	I_NetMenuReturnToMenu();
 	D_Cleanup();
 	CloseNetwork();
 	GC::FinalGC = true;

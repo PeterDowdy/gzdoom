@@ -62,6 +62,8 @@
 #	include <unistd.h>
 #	include <netdb.h>
 #	include <sys/ioctl.h>
+#	include <ifaddrs.h>
+#	include <net/if.h>
 #	ifdef __sun
 #		include <fcntl.h>
 #	endif
@@ -78,6 +80,7 @@
 #include "c_cvars.h"
 #include "i_net.h"
 #include "m_random.h"
+#include "i_time.h"
 
 /* [Petteri] Get more portable: */
 #ifndef __WIN32__
@@ -129,6 +132,9 @@ enum ENetConnectType : uint8_t
 	PRE_INVALID_FILES,		// Sent from host to guest if their files do not match the host's
 	PRE_KICKED,				// Sent from hsot to guest if the host kicked them from the game
 	PRE_BANNED,				// Sent from host to guest if the host banned them from the game
+
+	PRE_DISCOVER,			// Broadcast by someone browsing for lobbies on the local network
+	PRE_ANNOUNCE,			// Sent from host to a browser in answer: who is hosting and how full the lobby is
 };
 
 enum EConnectionStatus
@@ -185,6 +191,7 @@ static FConnection	Connected[MAXPLAYERS] = {};
 static uint8_t		TransmitBuffer[MaxTransmitSize] = {};
 static TArray<sockaddr_in> BannedConnections = {};
 static bool bGameStarted = false;
+static bool bNetStarting = false;	// -host or -join was asked for and the game hasn't got going yet
 
 CUSTOM_CVAR(String, net_password, "", CVAR_IGNORE)
 {
@@ -739,6 +746,27 @@ void HandleIncomingConnection()
 	}
 }
 
+// Answers a PRE_DISCOVER probe: the engine version (so a browser can tell if it could join), how full the lobby is,
+// whether it wants a password and the host's name.
+static void AnnounceLobby(const sockaddr_in& to, int connectedPlayers)
+{
+	NetBuffer[0] = NCMD_SETUP;
+	NetBuffer[1] = PRE_ANNOUNCE;
+	NetBuffer[2] = connectedPlayers;
+	NetBuffer[3] = MaxClients;
+	NetBuffer[4] = strlen(net_password) > 0 ? 1 : 0;
+	uint8_t* version = &NetBuffer[5];
+	Net_SetEngineInfo(version);
+	NetBufferLength = 8u;
+
+	const char* name = Net_GetClientName(0, 24u);
+	for (; *name && NetBufferLength < 8u + 24u; ++name)
+		NetBuffer[NetBufferLength++] = *name;
+	NetBuffer[NetBufferLength++] = 0;
+
+	SendPacket(to);
+}
+
 static bool Host_CheckForConnections(void* connected)
 {
 	const bool forceStarting = I_ShouldStartNetGame();
@@ -794,6 +822,12 @@ static bool Host_CheckForConnections(void* connected)
 
 		if (NetBuffer[0] != NCMD_SETUP)
 			continue;
+
+		if (NetBuffer[1] == PRE_DISCOVER)
+		{
+			AnnounceLobby(from, *connectedPlayers);
+			continue;
+		}
 
 		if (NetBuffer[1] == PRE_CONNECT)
 		{
@@ -1268,6 +1302,182 @@ static bool JoinGame(int arg)
 }
 
 //
+// I_NetScanLAN
+//
+// Looks for lobbies a would-be guest could join: broadcasts a PRE_DISCOVER probe on every network this machine is on
+// (and to itself, so a game hosted on this machine shows up), then collects the PRE_ANNOUNCE answers for `waitMs`.
+// Uses a socket of its own, so it works from the menu before any network game exists.
+//
+void I_NetScanLAN(int port, int waitMs, TArray<FLanGame>& found)
+{
+	found.Clear();
+	if (netgame || port <= 0 || port > 65535)
+		return;
+
+#ifdef __WIN32__
+	WSADATA data;
+	if (WSAStartup(0x0101, &data))
+		return;
+#endif
+
+	SOCKET s = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (s == INVALID_SOCKET)
+	{
+#ifdef __WIN32__
+		WSACleanup();
+#endif
+		return;
+	}
+
+	int yes = 1;
+	setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&yes, sizeof(yes));
+	u_long nonBlocking = 1u;
+#ifndef __sun
+	ioctlsocket(s, FIONBIO, &nonBlocking);
+#else
+	fcntl(s, F_SETFL, nonBlocking | O_NONBLOCK);
+#endif
+
+	sockaddr_in local = {};
+	local.sin_family = AF_INET;
+	local.sin_addr.s_addr = INADDR_ANY;
+	local.sin_port = 0;
+	bind(s, (sockaddr*)&local, sizeof(local));
+
+	auto target = [&](uint32_t hostOrderAddress)
+	{
+		sockaddr_in a = {};
+		a.sin_family = AF_INET;
+		a.sin_addr.s_addr = htonl(hostOrderAddress);
+		a.sin_port = htons(port);
+		return a;
+	};
+
+	TArray<sockaddr_in> targets;
+	targets.Push(target(INADDR_BROADCAST));
+	targets.Push(target(INADDR_LOOPBACK));
+#ifndef __WIN32__
+	// The all-ones broadcast only leaves by the default route, so also ask on each network by its own broadcast address.
+	ifaddrs* interfaces = nullptr;
+	if (getifaddrs(&interfaces) == 0)
+	{
+		for (ifaddrs* i = interfaces; i != nullptr; i = i->ifa_next)
+		{
+			if (i->ifa_addr == nullptr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_BROADCAST) || !(i->ifa_flags & IFF_UP) || i->ifa_broadaddr == nullptr)
+				continue;
+
+			sockaddr_in a = *(sockaddr_in*)i->ifa_broadaddr;
+			a.sin_port = htons(port);
+			targets.Push(a);
+		}
+		freeifaddrs(interfaces);
+	}
+#endif
+
+	// A setup packet is its CRC (without a game ID) followed by the data.
+	uint8_t probe[6] = {};
+	probe[4] = NCMD_SETUP;
+	probe[5] = PRE_DISCOVER;
+	const uint32_t probeCRC = CalcCRC32(&probe[4], 2);
+	probe[0] = probeCRC >> 24;
+	probe[1] = probeCRC >> 16;
+	probe[2] = probeCRC >> 8;
+	probe[3] = probeCRC;
+
+	auto sendProbes = [&]()
+	{
+		for (auto& to : targets)
+			sendto(s, (const char*)probe, sizeof(probe), 0, (const sockaddr*)&to, sizeof(to));
+	};
+
+	const uint64_t start = I_msTime();
+	uint64_t lastProbe = start;
+	sendProbes();
+
+	uint8_t packet[MaxTransmitSize] = {};
+	uint8_t message[MAX_MSGLEN] = {};
+	while (I_msTime() - start < (uint64_t)max(waitMs, 0))
+	{
+		// UDP drops things, so ask again part way through.
+		if (I_msTime() - lastProbe >= (uint64_t)max(waitMs, 1) / 3u)
+		{
+			sendProbes();
+			lastProbe = I_msTime();
+		}
+
+		sockaddr_in from = {};
+		socklen_t fromSize = sizeof(from);
+		const int size = recvfrom(s, (char*)packet, MaxTransmitSize, 0, (sockaddr*)&from, &fromSize);
+		if (size <= 5)
+		{
+			Sleep(5);
+			continue;
+		}
+
+		const uint8_t* body = &packet[4];
+		const uint32_t crc = (packet[0] << 24) | (packet[1] << 16) | (packet[2] << 8) | packet[3];
+		if (crc != CalcCRC32(body, size - 4) || !(*body & NCMD_SETUP))
+			continue;
+
+		size_t length = 0u;
+		message[0] = *body & ~NCMD_COMPRESSED;
+		if (*body & NCMD_COMPRESSED)
+		{
+			uLongf inflated = MAX_MSGLEN - 1;
+			if (uncompress(message + 1, &inflated, body + 1, size - 5) != Z_OK)
+				continue;
+			length = inflated + 1;
+		}
+		else
+		{
+			length = size - 4;
+			memcpy(message + 1, body + 1, length - 1);
+		}
+
+		if (length < 9 || message[0] != NCMD_SETUP || message[1] != PRE_ANNOUNCE)
+			continue;
+
+		FLanGame game;
+		game.Players = message[2];
+		game.MaxPlayers = message[3];
+		game.Password = message[4] != 0;
+		uint8_t* version = &message[5];
+		game.Compatible = Net_VerifyEngine(version);
+		message[length < MAX_MSGLEN ? length : MAX_MSGLEN - 1] = 0;
+		game.HostName = (const char*)&message[8];
+		game.Address.Format("%s:%d", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
+
+		bool known = false;
+		for (auto& other : found)
+			known |= (other.Address == game.Address);
+		if (!known)
+			found.Push(game);
+	}
+
+	closesocket(s);
+#ifdef __WIN32__
+	WSACleanup();
+#endif
+
+	// A game on this machine answers both the broadcast and the loopback probe; keep the one with the real address.
+	for (unsigned i = found.Size(); i-- > 0;)
+	{
+		if (strncmp(found[i].Address.GetChars(), "127.", 4))
+			continue;
+
+		for (unsigned j = 0; j < found.Size(); ++j)
+		{
+			if (j != i && found[j].HostName == found[i].HostName && found[j].Players == found[i].Players
+				&& found[j].MaxPlayers == found[i].MaxPlayers && strncmp(found[j].Address.GetChars(), "127.", 4))
+			{
+				found.Delete(i);
+				break;
+			}
+		}
+	}
+}
+
+//
 // I_InitNetwork
 //
 // Returns true if packet server mode might be a good idea.
@@ -1298,11 +1508,13 @@ bool I_InitNetwork()
 	int arg = -1;
 	if ((arg = Args->CheckParm("-host")))
 	{
+		bNetStarting = true;
 		if (!HostGame(arg + 1, v != nullptr))
 			return false;
 	}
 	else if ((arg = Args->CheckParm("-join")))
 	{
+		bNetStarting = true;
 		if (!JoinGame(arg + 1))
 			return false;
 	}
@@ -1316,8 +1528,15 @@ bool I_InitNetwork()
 		Net_SetupUserInfo();
 	}
 
+	bNetStarting = false;
 	bGameStarted = true;
 	return true;
+}
+
+// True if the game is ending while it was still setting up a network game: aborted in the lobby, or a failed connection.
+bool I_NetStartInterrupted()
+{
+	return bNetStarting;
 }
 
 #ifdef __WIN32__

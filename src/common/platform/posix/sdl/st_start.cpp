@@ -43,6 +43,7 @@
 
 #include "basics.h"
 #include "st_start.h"
+#include "netstartwindow.h"
 
 // MACROS ------------------------------------------------------------------
 
@@ -85,6 +86,14 @@ extern volatile sig_atomic_t gameloop_abort;
 // PRIVATE DATA DEFINITIONS ------------------------------------------------
 
 static const char SpinnyProgressChars[4] = { '|', '/', '-', '\\' };
+
+// With a desktop to draw on, the lobby is a window (the one Windows uses) instead of text in the terminal, so a game
+// hosted or joined from the menu can be seen and aborted without one.
+static bool UseLobbyWindow()
+{
+	static const bool use = getenv("DISPLAY") != nullptr || getenv("WAYLAND_DISPLAY") != nullptr;
+	return use;
+}
 
 // CODE --------------------------------------------------------------------
 
@@ -156,6 +165,11 @@ void FTTYStartupScreen::Progress(int advance)
 
 void FTTYStartupScreen::NetInit(const char* message, bool host)
 {
+	if (UseLobbyWindow())
+	{
+		NetStartWindow::NetInit(message, host);
+		return;
+	}
 	if (!DidNetInit)
 	{
 		termios rawtermios;
@@ -178,21 +192,41 @@ void FTTYStartupScreen::NetInit(const char* message, bool host)
 
 void FTTYStartupScreen::NetMessage(const char* message)
 {
+	if (UseLobbyWindow())
+	{
+		NetStartWindow::NetMessage(message);
+		return;
+	}
 	TheNetMessage = message;
 }
 
 void FTTYStartupScreen::NetConnect(int client, const char* name, unsigned flags, int status)
 {
+	if (UseLobbyWindow())
+	{
+		NetStartWindow::NetConnect(client, name, flags, status);
+		return;
+	}
 
 }
 
 void FTTYStartupScreen::NetUpdate(int client, int status)
 {
+	if (UseLobbyWindow())
+	{
+		NetStartWindow::NetUpdate(client, status);
+		return;
+	}
 
 }
 
 void FTTYStartupScreen::NetDisconnect(int client)
 {
+	if (UseLobbyWindow())
+	{
+		NetStartWindow::NetDisconnect(client);
+		return;
+	}
 
 }
 
@@ -206,6 +240,11 @@ void FTTYStartupScreen::NetDisconnect(int client)
 
 void FTTYStartupScreen::NetProgress(int cur, int limit)
 {
+	if (UseLobbyWindow())
+	{
+		NetStartWindow::NetProgress(cur, limit);
+		return;
+	}
 	int i;
 
 	NetMaxPos = limit;
@@ -238,7 +277,13 @@ void FTTYStartupScreen::NetProgress(int cur, int limit)
 //===========================================================================
 
 void FTTYStartupScreen::NetDone()
-{	
+{
+	if (UseLobbyWindow())
+	{
+		NetStartWindow::NetDone();
+		return;
+	}
+
 	CurPos = MaxPos;
 	CleanProgressBar();
 	// Restore stdin settings
@@ -252,21 +297,38 @@ void FTTYStartupScreen::NetDone()
 
 void FTTYStartupScreen::NetClose()
 {
+	if (UseLobbyWindow())
+	{
+		NetStartWindow::NetClose();
+		return;
+	}
 	// TODO: Implement this
 }
 
 bool FTTYStartupScreen::ShouldStartNet()
 {
+	if (UseLobbyWindow())
+	{
+		return NetStartWindow::ShouldStartNet();
+	}
 	return false;
 }
 
 int FTTYStartupScreen::GetNetKickClient()
 {
+	if (UseLobbyWindow())
+	{
+		return NetStartWindow::GetNetKickClient();
+	}
 	return -1;
 }
 
 int FTTYStartupScreen::GetNetBanClient()
 {
+	if (UseLobbyWindow())
+	{
+		return NetStartWindow::GetNetBanClient();
+	}
 	return -1;
 }
 
@@ -286,6 +348,10 @@ int FTTYStartupScreen::GetNetBanClient()
 
 bool FTTYStartupScreen::NetLoop(bool (*loopCallback)(void *), void *data)
 {
+	if (UseLobbyWindow())
+	{
+		return NetStartWindow::NetLoop(loopCallback, data);
+	}
 	fd_set rfds;
 	struct timeval tv;
 	int retval;

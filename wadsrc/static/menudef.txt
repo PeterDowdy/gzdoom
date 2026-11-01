@@ -96,6 +96,7 @@ LISTMENU "MainMenu"
 	IfGame(Heretic, Hexen)
 	{
 		TextItem "$MNU_NEWGAME", "n", "PlayerclassMenu"
+		TextItem "Multiplayer", "m", "NetGameMenu"
 		TextItem "$MNU_OPTIONS", "o", "OptionsMenu"
 		TextItem "$MNU_GAMEFILES", "g", "GameFilesMenu"
 		TextItem "$MNU_INFO", "i", "ReadThisMenu"
@@ -3130,3 +3131,65 @@ OptionMenu VideoOptionsSimple protected {}
 OptionMenu ScalingOptionsSimple protected {}
 OptionMenu MiscOptionsSimple protected {}
 OptionMenu "MouseOptionsSimple" protected {}
+
+//-------------------------------------------------------------------------------------------
+//
+// Multiplayer: starting or joining a network game from the main menu.
+//
+//-------------------------------------------------------------------------------------------
+
+OptionValue "MultiplayerModes"
+{
+	0, "Co-operative"
+	1, "Deathmatch"
+	2, "Alternate deathmatch"
+}
+
+OptionValue "MultiplayerSkills"
+{
+	1, "1 (easiest)"
+	2, "2"
+	3, "3"
+	4, "4"
+	5, "5 (hardest)"
+}
+
+OptionMenu "NetGameMenu"
+{
+	Title "Multiplayer"
+	Submenu "Host a game", "NetGameHostMenu"
+	Submenu "Join a game on this network", "NetGameLanMenu"
+	Submenu "Join by IP address", "NetGameJoinMenu"
+	StaticText " "
+	Submenu "Player setup (name, colour, class)", "PlayerMenu"
+}
+
+OptionMenu "NetGameHostMenu"
+{
+	Title "Host a game"
+	Slider "Players", "mp_players", 2, 8, 1, 0
+	Option "Game type", "mp_mode", "MultiplayerModes"
+	Option "Skill", "mp_skill", "MultiplayerSkills"
+	TextField "Start on map (number)", "mp_map"
+	TextField "Port", "mp_port"
+	TextField "Password (optional)", "mp_password"
+	StaticText " "
+	Command "Start hosting", "mphost"
+	StaticText "The game restarts and waits for the other players"
+}
+
+OptionMenu "NetGameLanMenu"
+{
+	Class "MultiplayerLanMenu"
+	Title "Games on this network"
+}
+
+OptionMenu "NetGameJoinMenu"
+{
+	Title "Join by IP address"
+	TextField "Address", "mp_address"
+	TextField "Password, if it has one", "mp_password"
+	StaticText " "
+	Command "Join", "mpjoin"
+	StaticText "Like 192.168.1.20 or myhost:5029"
+}

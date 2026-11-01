@@ -53,6 +53,7 @@
 #include "m_argv.h"
 #include "printf.h"
 #include "version.h"
+#include "i_net.h"
 
 // MACROS ------------------------------------------------------------------
 
@@ -206,6 +207,8 @@ int main (int argc, char **argv)
 	const int result = GameMain();
 
 	SDL_Quit();
+
+	I_RelaunchIfRequested();
 
 	return result;
 }
