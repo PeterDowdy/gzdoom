@@ -43,6 +43,7 @@
 #include "c_cvars.h"
 #include "cmdlib.h"
 #include "engineerrors.h"
+#include "i_net.h"
 #include "i_system.h"
 #include "m_argv.h"
 #include "printf.h"
@@ -227,6 +228,7 @@ int DoMain(int argc, char** argv)
 
 	auto ret = GameMain();
 	FConsoleWindow::DeleteInstance();
+	I_RelaunchIfRequested();	// a network game started from the menu
 	return ret;
 }
 

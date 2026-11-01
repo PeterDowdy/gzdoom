@@ -71,6 +71,7 @@
 #include "s_soundinternal.h"
 #include "vm.h"
 #include "i_system.h"
+#include "i_net.h"
 #include "gstrings.h"
 #include "s_music.h"
 
@@ -328,6 +329,8 @@ int DoMain (HINSTANCE hInstance)
 		GetModuleFileNameW(hModule, path, MAX_PATH);
 		ShellExecuteW(NULL, L"open", path, GetCommandLineW(), NULL, SW_SHOWNORMAL);
 	}
+
+	I_RelaunchIfRequested();	// a network game started from the menu
 
 	DestroyCustomCursor();
 	if (ret == 1337) // special exit code for 'norun'.

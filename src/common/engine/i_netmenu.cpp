@@ -15,8 +15,18 @@
 #include <errno.h>
 #include <string.h>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#else
 #include <unistd.h>
+#ifdef __APPLE__
+#include <limits.h>
+#include <spawn.h>
+#include <mach-o/dyld.h>
+extern char** environ;
+#endif
 #endif
 
 #include "c_cvars.h"
@@ -83,10 +93,6 @@ static std::vector<std::string> ArgumentsToKeep()
 
 static bool CanStartNetGame()
 {
-#ifdef _WIN32
-	Printf(TEXTCOLOR_RED "Starting a network game from the menu isn't supported on Windows yet. Use -host or -join.\n");
-	return false;
-#else
 	if (netgame || multiplayer)
 	{
 		Printf(TEXTCOLOR_RED "Already in a network game.\n");
@@ -99,7 +105,6 @@ static bool CanStartNetGame()
 		return false;
 	}
 	return true;
-#endif
 }
 
 // Quit, and let main() start the game again with these arguments once everything has been shut down and saved.
@@ -195,19 +200,81 @@ void I_NetMenuReturnToMenu()
 		RelaunchArgv = ArgumentsToKeep();
 }
 
-// Called by main() after the game has shut down. Only returns if no restart was asked for, or it failed.
+#ifdef _WIN32
+// One argument as CommandLineToArgvW (and the C runtime) will read it back.
+static std::wstring QuoteArgument(const std::wstring& arg)
+{
+	if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos)
+		return arg;
+
+	std::wstring out = L"\"";
+	for (auto it = arg.begin();; ++it)
+	{
+		size_t backslashes = 0;
+		for (; it != arg.end() && *it == L'\\'; ++it)
+			++backslashes;
+
+		if (it == arg.end())
+		{
+			out.append(backslashes * 2, L'\\');	// they come right before the closing quote
+			break;
+		}
+		else if (*it == L'"')
+		{
+			out.append(backslashes * 2 + 1, L'\\');
+			out.push_back(L'"');
+		}
+		else
+		{
+			out.append(backslashes, L'\\');
+			out.push_back(*it);
+		}
+	}
+	out.push_back(L'"');
+	return out;
+}
+#endif
+
+// Called by the platform's main() after the game has shut down. Only returns if no restart was asked for, or it failed.
+// Linux execs, so it's the same process (the studio's Play keeps tracking it). Windows and macOS start the program
+// again and let this one end, as the existing "restart" on Windows does.
 void I_RelaunchIfRequested()
 {
-#ifndef _WIN32
 	if (RelaunchArgv.empty())
 		return;
 
+#ifdef _WIN32
+	WCHAR path[MAX_PATH];
+	if (GetModuleFileNameW(nullptr, path, MAX_PATH) == 0)
+		return;
+
+	std::wstring parameters;
+	for (size_t i = 1; i < RelaunchArgv.size(); ++i)
+	{
+		if (i > 1)
+			parameters += L' ';
+		parameters += QuoteArgument(FString(RelaunchArgv[i].c_str()).WideString());
+	}
+	ShellExecuteW(nullptr, L"open", path, parameters.c_str(), nullptr, SW_SHOWNORMAL);
+#else
 	std::vector<char*> argv;
 	for (auto& arg : RelaunchArgv)
 		argv.push_back(const_cast<char*>(arg.c_str()));
 	argv.push_back(nullptr);
 
+#ifdef __APPLE__
+	char exe[PATH_MAX];
+	uint32_t size = sizeof(exe);
+	if (_NSGetExecutablePath(exe, &size) == 0)
+	{
+		argv[0] = exe;
+		pid_t child;
+		if (posix_spawn(&child, exe, nullptr, nullptr, argv.data(), environ) == 0)
+			return;
+	}
+#else
 	execv("/proc/self/exe", argv.data());	// the same binary, whatever it was started as
+#endif
 	execvp(argv[0], argv.data());
 	fprintf(stderr, "Couldn't start the network game: %s\n", strerror(errno));
 #endif
