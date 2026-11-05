@@ -9,6 +9,7 @@
 //
 //-----------------------------------------------------------------------------
 
+#include <functional>
 #include <string>
 #include <vector>
 #include <set>
@@ -42,6 +43,12 @@ extern char** environ;
 
 extern FString lastIWAD;
 
+// The yes/no box the engine's own "end game" and "quit" use; the handler runs on yes.
+typedef void(*hfunc)();
+DMenu* CreateMessageBoxMenu(DMenu* parent, const char* message, int messagemode, bool playsound, FName action = NAME_None, hfunc handler = nullptr);
+void M_ActivateMenu(DMenu* menu);
+extern DMenu* CurrentMenu;
+
 // What the menu's forms edit. The password is deliberately not saved.
 CVAR(Int, mp_players, 2, CVAR_ARCHIVE)
 CVAR(Int, mp_mode, 0, CVAR_ARCHIVE)			// 0 co-operative, 1 deathmatch, 2 alternate deathmatch
@@ -58,7 +65,7 @@ static std::vector<std::string> ArgumentsToKeep()
 {
 	// Switches that stand alone, and switches that take values (every argument after them that isn't a switch).
 	static const std::set<std::string> flags = { "-deathmatch", "-altdeath", "-coop", "-netmenu" };
-	static const std::set<std::string> valued = { "-host", "-join", "-port", "-password", "-netmode", "-warp", "-skill", "-loadgame" };
+	static const std::set<std::string> valued = { "-host", "-join", "-port", "-password", "-netmode", "-warp", "-skill", "-loadgame", "+map", "+warp" };
 
 	std::vector<std::string> kept;
 	const int count = Args->NumArgs();
@@ -91,7 +98,11 @@ static std::vector<std::string> ArgumentsToKeep()
 	return kept;
 }
 
-static bool CanStartNetGame()
+// Starting a network game starts the program again, which ends any game being played. In a level, ask first, and carry
+// on with `proceed` if the player says yes. Returns true if it's fine to go ahead right now.
+static std::function<void()> AfterConfirmation;
+
+static bool CanStartNetGame(std::function<void()> proceed)
 {
 	if (netgame || multiplayer)
 	{
@@ -100,8 +111,17 @@ static bool CanStartNetGame()
 	}
 	if (gamestate == GS_LEVEL)
 	{
-		// The game has to start again, which would lose whatever hasn't been saved.
-		M_StartMessage("You're in the middle of a game. Quit to the title screen before hosting or joining a network game.\n\nPress any key.", 1);
+		AfterConfirmation = std::move(proceed);
+		DMenu* box = CreateMessageBoxMenu(CurrentMenu,
+			"Hosting or joining a network game ends the game you're playing, and anything you haven't saved is lost.\n\nAre you sure?\n\nPress Y or N.",
+			0, false, NAME_None, []()
+			{
+				auto go = std::move(AfterConfirmation);
+				AfterConfirmation = nullptr;
+				if (go)
+					go();
+			});
+		M_ActivateMenu(box);
 		return false;
 	}
 	return true;
@@ -126,13 +146,8 @@ static bool IsNumber(const char* text)
 	return true;
 }
 
-// mphost [players]: host a game with the menu's settings and wait for the other players.
-CCMD(mphost)
+[[noreturn]] static void StartHosting(int players)
 {
-	if (!CanStartNetGame())
-		return;
-
-	int players = argv.argc() > 1 ? atoi(argv[1]) : *mp_players;
 	players = clamp(players, 2, 8);
 
 	auto args = ArgumentsToKeep();
@@ -164,22 +179,8 @@ CCMD(mphost)
 	Relaunch(std::move(args));
 }
 
-// mpjoin [address]: join a game, the address being "host" or "host:port".
-CCMD(mpjoin)
+[[noreturn]] static void StartJoining(const FString& address)
 {
-	if (!CanStartNetGame())
-		return;
-
-	FString address = argv.argc() > 1 ? FString(argv[1]) : FString(*mp_address);
-	address.StripLeftRight();
-	if (address.IsEmpty())
-	{
-		Printf(TEXTCOLOR_RED "No address to join.\n");
-		return;
-	}
-	if (argv.argc() <= 1)
-		mp_address = address.GetChars();
-
 	auto args = ArgumentsToKeep();
 	args.push_back("-netmenu");
 	args.push_back("-join");
@@ -191,6 +192,31 @@ CCMD(mpjoin)
 	}
 
 	Relaunch(std::move(args));
+}
+
+// mphost [players]: host a game with the menu's settings and wait for the other players.
+CCMD(mphost)
+{
+	const int players = argv.argc() > 1 ? atoi(argv[1]) : *mp_players;
+	if (CanStartNetGame([players]() { StartHosting(players); }))
+		StartHosting(players);
+}
+
+// mpjoin [address]: join a game, the address being "host" or "host:port".
+CCMD(mpjoin)
+{
+	FString address = argv.argc() > 1 ? FString(argv[1]) : FString(*mp_address);
+	address.StripLeftRight();
+	if (address.IsEmpty())
+	{
+		Printf(TEXTCOLOR_RED "No address to join.\n");
+		return;
+	}
+	if (argv.argc() <= 1)
+		mp_address = address.GetChars();
+
+	if (CanStartNetGame([address]() { StartJoining(address); }))
+		StartJoining(address);
 }
 
 void I_NetMenuReturnToMenu()
